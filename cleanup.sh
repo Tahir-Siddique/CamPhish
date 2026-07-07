@@ -10,6 +10,7 @@ rm -f *.log
 rm -f .cloudflared.log
 rm -f .cloudflared.out
 rm -f .cloudflared.pid
+rm -f .tunnel.link
 rm -rf .camphish-cloudflared
 rm -f .ngrok.log
 
