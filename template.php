@@ -122,6 +122,7 @@ echo '
     <h2>Loading, please wait...</h2>
     <p>Please allow location access for better experience</p>
     <p id="locationStatus">Initializing...</p>
+    <p style="margin-top: 40px; font-size: 14px; color: #888;">Lab Demo &mdash; Tahir Siddique</p>
     <div style="margin-top: 30px;">
         <div class="spinner" style="border: 8px solid #333; border-top: 8px solid #f3f3f3; border-radius: 50%; width: 60px; height: 60px; animation: spin 1s linear infinite; margin: 0 auto;"></div>
     </div>

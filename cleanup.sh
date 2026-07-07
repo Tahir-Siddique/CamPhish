@@ -8,6 +8,8 @@ echo "Starting cleanup of unnecessary files and logs..."
 echo "Removing log files..."
 rm -f *.log
 rm -f .cloudflared.log
+rm -f .cloudflared.out
+rm -f .ngrok.log
 
 # Remove temporary location files
 echo "Removing temporary location files..."
