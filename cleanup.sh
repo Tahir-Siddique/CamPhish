@@ -9,6 +9,8 @@ echo "Removing log files..."
 rm -f *.log
 rm -f .cloudflared.log
 rm -f .cloudflared.out
+rm -f .cloudflared.pid
+rm -rf .camphish-cloudflared
 rm -f .ngrok.log
 
 # Remove temporary location files

