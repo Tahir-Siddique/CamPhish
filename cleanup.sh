@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # Cleanup script for CamPhish
 # Removes all unnecessary files and logs
 
@@ -10,9 +10,12 @@ rm -f *.log
 rm -f .cloudflared.log
 rm -f .cloudflared.out
 rm -f .cloudflared.pid
-rm -f .tunnel.link
+rm -f .php-server.log
+rm -f .php-server.pid
 rm -rf .camphish-cloudflared
 rm -f .ngrok.log
+rm -f .ngrok.pid
+rm -f .tunnel.link
 
 # Remove temporary location files
 echo "Removing temporary location files..."
@@ -41,4 +44,4 @@ rm -f LocationLog.log
 rm -f LocationError.log
 rm -f Log.log
 
-echo "Cleanup completed successfully!" 
+echo "Cleanup completed successfully!"
