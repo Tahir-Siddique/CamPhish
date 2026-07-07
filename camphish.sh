@@ -103,7 +103,7 @@ fi
 local spin='|/-\'
 local i=0
 while true; do
-printf "\r\e[1;93m[\e[0m%s\e[1;93m]\e[0m %s" "${spin:i++%4:1}" "$msg"
+printf "\r\e[1;93m[\e[0m%s\e[1;93m]\e[0m %s" "${spin:i++%4:1}" "$msg" >&2
 sleep 0.12
 done
 ) &
@@ -116,7 +116,44 @@ kill "$LOADER_PID" 2>/dev/null
 wait "$LOADER_PID" 2>/dev/null
 fi
 LOADER_PID=""
-printf "\r\033[K"
+printf "\r\033[K" >&2
+}
+
+normalize_tunnel_link() {
+local raw="$1"
+local link=""
+link=$(printf '%s' "$raw" | grep -oE 'https://[a-z0-9]+(-[a-z0-9]+)+\.trycloudflare\.com' | head -n1)
+if [[ -n "$link" ]]; then
+printf '%s' "$link"
+return 0
+fi
+link=$(printf '%s' "$raw" | grep -oE 'https://[a-zA-Z0-9._-]+\.(ngrok-free\.app|ngrok-free\.dev|ngrok\.app|ngrok\.io|ngrok\.dev)(/[[:alnum:]/?=&._%-]*)?' | head -n1)
+if [[ -n "$link" ]]; then
+printf '%s' "$link"
+return 0
+fi
+link=$(printf '%s' "$raw" | grep -oE 'https?://[a-zA-Z0-9][a-zA-Z0-9._-]*(/[[:alnum:]/?=&._%-]*)?' | head -n1)
+[[ -n "$link" ]] && printf '%s' "$link"
+}
+
+save_tunnel_link() {
+local link
+link=$(normalize_tunnel_link "$1")
+if [[ -z "$link" || "$link" != http* ]]; then
+return 1
+fi
+printf '%s' "$link" > .tunnel.link
+}
+
+read_tunnel_link() {
+local link=""
+[[ -f ".tunnel.link" ]] || return 1
+link=$(tr -d '\r\n ' < .tunnel.link)
+link=$(normalize_tunnel_link "$link")
+if [[ -z "$link" || "$link" != http* ]]; then
+return 1
+fi
+printf '%s' "$link"
 }
 
 run_with_loader() {
@@ -359,8 +396,9 @@ stop_loader
 print_new_ngrok_lines
 printf "\e[1;92m[\e[0m*\e[1;92m] Ngrok tunnel established\e[0m\n"
 show_ngrok_log_summary
-printf '%s' "$link"
+if save_tunnel_link "$link"; then
 return 0
+fi
 fi
 if [[ -f ".ngrok.log" ]] && grep -qE "ERR_NGROK_8014|Acceptable Use policy|authentication failed|failed to authenticate|invalid authtoken" ".ngrok.log"; then
 stop_loader
@@ -404,6 +442,7 @@ printf "%s" "$ip"
 
 payload_site() {
 link="$1"
+link=$(normalize_tunnel_link "$link")
 if [[ -z "$link" || "$link" != http* ]]; then
 printf "\e[1;31m[!] Invalid tunnel link — cannot generate pages.\e[0m\n"
 printf "\e[1;93m[\e[0m!\e[1;93m] Got: %s\e[0m\n" "$link"
@@ -563,8 +602,9 @@ fi
 link=$(get_cloudflare_link ".cloudflared.out")
 if [[ -n "$link" ]] && cloudflared_is_running; then
 stop_loader
-printf '%s' "$link"
+if save_tunnel_link "$link"; then
 return 0
+fi
 fi
 sleep 2
 attempt=$((attempt + 1))
@@ -576,7 +616,7 @@ return 1
 }
 
 launch_cloudflared_with_retry() {
-local cf_bin link proto
+local cf_bin proto
 cf_bin=$(cloudflared_bin)
 rm -f .cloudflared.log .tunnel.link
 
@@ -585,9 +625,7 @@ if [[ "$proto" != "auto" ]]; then
 stop_cloudflared_only
 fi
 start_cloudflared_tunnel "$cf_bin" "$proto"
-link=$(wait_for_cloudflare_tunnel)
-if [[ -n "$link" ]]; then
-printf '%s' "$link" > .tunnel.link
+if wait_for_cloudflare_tunnel; then
 return 0
 fi
 stop_cloudflared_only
@@ -809,7 +847,7 @@ exit 1
 fi
 
 if launch_cloudflared_with_retry; then
-link=$(tr -d '\r\n ' < .tunnel.link)
+link=$(read_tunnel_link)
 else
 link=""
 fi
@@ -975,7 +1013,11 @@ fi
 
 start_ngrok_tunnel "$ngrok_bin" "$ngrok_config"
 
-link=$(wait_for_ngrok_link)
+if wait_for_ngrok_link; then
+link=$(read_tunnel_link)
+else
+link=""
+fi
 if [[ -z "$link" ]]; then
 printf "\e[1;31m[!] Direct link is not generating.\e[0m\n"
 if ! show_ngrok_failure; then
